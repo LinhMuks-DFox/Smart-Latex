@@ -3,56 +3,45 @@
 Smart LaTeX Build Tool
 ======================
 
-A configurable, automated build script for LaTeX projects designed to simplify 
-the compilation process, manage tool chains, and parse error logs.
+A configurable, automated build script for LaTeX projects.
 
 Features:
-    1. **Auto-Detection**: Automatically detects the compiler via `%!TEX program` 
-       magic comments (pdflatex, xelatex, lualatex, latex).
-    2. **Configuration**: Supports per-directory `.pdfmake` config files to specify 
-       main files, output names, and custom tool chains.
-    3. **Error Parsing**: Filters and highlights LaTeX log noise to show only 
-       file:line:error messages.
-    4. **Workflow Management**: Handles clean/build cycles and DVI->PDF conversions.
-    5. **Output Renaming**: Automatically renames the final PDF based on config or CLI args.
+    1. **Auto-Detection**: Detects `%!TEX program` magic comments.
+    2. **Configuration**: Per-directory `.pdfmake` config files.
+    3. **Error Parsing**: Filters LaTeX log noise.
+    4. **Workflow**: Handles clean/build cycles and DVI->PDF.
 
 Usage:
     ./make [TARGET] [OPTIONS]
 
 Arguments:
-    TARGET           Directory containing .tex files or a specific .tex file path.
-                     (Defaults to current directory)
-    -c, --clean      Clean auxiliary files (aux, log, out, etc.).
-    -b, --build      Execute the build process.
-    -bc, --build-clean  Build first, then clean auxiliary files.
-    -cb, --clean-build  Clean first, then build.
-    -o, --output NAME   Rename the final PDF to NAME.
-    -v, --verbose       Enable debug logging.
+    TARGET           Directory or .tex file. (Defaults to current dir)
+    --init           Create a template .pdfmake config file in current dir.
+    -c, --clean      Clean auxiliary files.
+    -b, --build      Execute build.
+    -bc              Build then clean.
+    -cb              Clean then build.
+    -o NAME          Rename final PDF.
+    -v               Verbose debug logging.
 
 Configuration File (.pdfmake):
-    Place a `.pdfmake` file in the target directory to control build behavior:
+    key=value format. Comments start with #.
     
-    main=main.tex           # Specify the entry file
-    out=FinalPaper          # Specify the output PDF name
-    compiler=xelatex        # Force a specific compiler
-    tool_chain=[latex, bibtex, latex, latex, dvipdfmx]  # Custom build steps
-
-Supported Tools:
-    pdflatex, xelatex, lualatex, latex, dvipdfmx, biber, bibtex, makeglossaries
+    main=main.tex
+    out=FinalPaper
+    compiler=xelatex
+    # Simple comma-separated list for tool chain:
+    tool_chain=xelatex, biber, xelatex, xelatex
 """
-
 import os
 import subprocess
 import argparse
-import warnings
 import sys
 import re
 from pathlib import Path
 
-# 全局调试开关
 VERBOSE = False
 
-# ANSI 颜色代码
 class Colors:
     HEADER = '\033[95m'
     BLUE = '\033[94m'
@@ -62,24 +51,17 @@ class Colors:
     FAIL = '\033[91m'
     ENDC = '\033[0m'
     BOLD = '\033[1m'
-    UNDERLINE = '\033[4m'
 
 def debug(msg):
     if VERBOSE:
         print(f"{Colors.BLUE}[DEBUG] {msg}{Colors.ENDC}", file=sys.stderr)
 
-# 工具命令映射表 (增加了 -file-line-error 以便更好解析)
 TOOL_MAP = {
-    # 编译器
     "pdflatex": "pdflatex -file-line-error -interaction=nonstopmode {file}.tex",
     "xelatex":  "xelatex -file-line-error -interaction=nonstopmode {file}.tex",
     "lualatex": "lualatex -file-line-error -interaction=nonstopmode {file}.tex",
     "latex":    "latex -file-line-error -interaction=nonstopmode {file}.tex",
-    
-    # 后处理
     "dvipdfmx": "dvipdfmx {file}",
-    
-    # 参考文献与索引
     "biber":    "biber {file}",
     "bibtex":   "bibtex {file}",
     "makeglossaries": "makeglossaries {file}"
@@ -88,148 +70,121 @@ TOOL_MAP = {
 clean_files = [
     "*.aux", "*.bbl", "*.blg", "*.dvi", "*.out", "*.log", "*.toc",
     "*.lof", "*.lot", "build/", "*.synctex.gz", "*.fls",
-    "*.fdb_latexmk", "*.bcf", "*.run.xml", "*.glg", "*.gls", "*.glsdefs", "*.ist"
+    "*.fdb_latexmk", "*.bcf", "*.run.xml", "*.glg", "*.gls", "*.glsdefs", "*.ist",
+    "*.nav", "*.snm"
 ]
 
+def create_template_config():
+    content = """# .pdfmake configuration file
+main=main.tex
+# out=FinalPaper
+# tool_chain = xelatex, bibtex, xelatex, xelatex
+"""
+    p = Path(".pdfmake")
+    if p.exists():
+        print(f"{Colors.WARNING}File .pdfmake already exists. Skipping.{Colors.ENDC}")
+    else:
+        with open(p, "w", encoding="utf-8") as f:
+            f.write(content)
+        print(f"{Colors.GREEN}Created template .pdfmake{Colors.ENDC}")
+
 def clean(rules=clean_files):
-    print("Cleaning...")
+    print(f"{Colors.CYAN}Cleaning auxiliary files...{Colors.ENDC}")
     for pattern in rules:
-        cmd = f"rm -rf {pattern}"
-        debug(f"Executing clean: {cmd}")
-        subprocess.run(cmd, shell=True, capture_output=True)
-    print("Cleaned.")
+        subprocess.run(f"rm -rf {pattern}", shell=True, capture_output=True)
 
 def print_error_summary(stdout_content):
-    """
-    从乱糟糟的 LaTeX 日志中提取关键错误信息。
-    """
     print(f"\n{Colors.FAIL}================ BUILD FAILED ================ {Colors.ENDC}")
-    print(f"{Colors.WARNING}Parsing error log for key issues...{Colors.ENDC}\n")
-    
     found_error = False
     lines = stdout_content.splitlines()
-    
-    # 正则 1: 匹配 "main.tex:10: Error message" 这种格式 (由 -file-line-error 产生)
     file_line_pattern = re.compile(r'^.*:\d+:.*')
-    
-    # 正则 2: 匹配以 "! " 开头的传统 TeX 错误
     tex_error_pattern = re.compile(r'^! .*')
 
     for i, line in enumerate(lines):
-        is_error = False
-        
-        # 检查是否是错误行
-        if file_line_pattern.match(line):
-            is_error = True
+        if file_line_pattern.match(line) or tex_error_pattern.match(line):
             print(f"{Colors.FAIL}>> {line}{Colors.ENDC}")
-        elif tex_error_pattern.match(line):
-            is_error = True
-            print(f"{Colors.FAIL}>> {line}{Colors.ENDC}")
-            # 传统错误通常会在下一行显示行号信息 "l.10"，尝试提取下一行
-            if i + 1 < len(lines) and lines[i+1].strip().startswith('l.'):
+            if tex_error_pattern.match(line) and i + 1 < len(lines) and lines[i+1].strip().startswith('l.'):
                 print(f"{Colors.CYAN}   {lines[i+1].strip()}{Colors.ENDC}")
-
-        if is_error:
             found_error = True
 
     if not found_error:
-        print(f"{Colors.WARNING}Could not parse specific errors. Here are the last 20 lines:{Colors.ENDC}")
+        print(f"{Colors.WARNING}Last 20 lines:{Colors.ENDC}")
         print('\n'.join(lines[-20:]))
-    else:
-        print(f"\n{Colors.WARNING}(Run with -v to see full log){Colors.ENDC}")
-    
     print(f"{Colors.FAIL}============================================== {Colors.ENDC}")
 
 def detect_compiler(tex_file_path):
-    """读取文件头检测 %!TEX program"""
-    debug(f"Detecting compiler from file: {tex_file_path}")
+    debug(f"Detecting compiler from: {tex_file_path}")
     try:
         with open(tex_file_path, 'r', encoding='utf-8') as f:
             for i, line in enumerate(f):
-                if i > 20: break # 增加到读取前20行
-                
-                # 1. 尝试匹配标准格式: %!TEX program = xelatex 或 %!TEX TS-program = xelatex
-                # (?:TS-)? 是非捕获组，匹配可选的 TS- 前缀
-                m1 = re.match(r'%\s*!TEX\s+(?:TS-)?program\s*=\s*([a-zA-Z0-9]+)', line, re.IGNORECASE)
-                if m1:
-                    compiler = m1.group(1).lower()
-                    debug(f"Magic comment found (Standard): {compiler}")
-                    return compiler
-                
-                # 2. 尝试匹配简写格式: %!TEX xelatex
-                # 限制只匹配已知的编译器关键字，防止误匹配 %!TEX root = ...
+                if i > 20: break
+                m = re.match(r'%\s*!TEX\s+(?:TS-)?program\s*=\s*([a-zA-Z0-9]+)', line, re.IGNORECASE)
+                if m: return m.group(1).lower()
                 m2 = re.match(r'%\s*!TEX\s+(pdflatex|xelatex|lualatex|latex)\b', line, re.IGNORECASE)
-                if m2:
-                    compiler = m2.group(1).lower()
-                    debug(f"Magic comment found (Shorthand): {compiler}")
-                    return compiler
-
-    except Exception as e:
-        debug(f"Error reading file header: {e}")
-    
-    debug("No magic comment found, defaulting to pdflatex")
+                if m2: return m2.group(1).lower()
+    except Exception:
+        pass
     return "pdflatex"
 
 def generate_build_rules(config, tex_file_path):
-    if config.get('compiler'):
-        compiler = config['compiler']
-    else:
-        compiler = detect_compiler(tex_file_path)
-    
-    print(f"Using Compiler: {Colors.GREEN}{compiler}{Colors.ENDC}")
+    # 1. 获取基础编译器（检测 或 配置指定）
+    detected = detect_compiler(tex_file_path)
+    compiler = config.get('compiler', detected)
 
+    rules = []
+    chain_names = []
+
+    # 2. 逻辑修正：优先判断是否存在 tool_chain
     if 'tool_chain' in config and config['tool_chain']:
         chain_names = config['tool_chain']
+        # 如果定义了 tool_chain，打印它而不是打印默认编译器
+        print(f"{Colors.CYAN}Custom Tool Chain: {', '.join(chain_names)}{Colors.ENDC}")
     else:
+        # 只有没有 tool_chain 时，才打印检测到的编译器
+        print(f"Compiler: {Colors.GREEN}{compiler}{Colors.ENDC}")
         if compiler == 'latex':
             chain_names = [compiler, "biber", compiler, compiler, "dvipdfmx"]
         else:
             chain_names = [compiler, "biber", compiler, compiler]
 
-    rules = []
+    # 3. 生成命令列表
     for tool in chain_names:
-        tool = tool.strip()
-        if tool in TOOL_MAP:
-            rules.append(TOOL_MAP[tool])
-        elif tool == "compiler": 
-            rules.append(TOOL_MAP.get(compiler, TOOL_MAP['pdflatex']))
+        # 支持 tool_chain 里写 "compiler" 占位符
+        if tool == "compiler":
+            real_tool = compiler
         else:
-            rules.append(f"{tool} {{file}}")
-            
+            real_tool = tool
+        
+        # 如果工具在 MAP 里则取 MAP，否则认为是一个直接命令
+        rules.append(TOOL_MAP.get(real_tool, f"{real_tool} {{file}}"))
+        
     return rules
 
 def build(file_basename, rules):
     if not os.path.exists(f"{file_basename}.tex"):
-        warnings.warn(f"File '{file_basename}.tex' not found. Nothing built.")
+        print(f"{Colors.FAIL}Error: '{file_basename}.tex' not found.{Colors.ENDC}", file=sys.stderr)
         return False
     
+    total = len(rules)
     for idx, rule in enumerate(rules):
         cmd = rule.format(file=file_basename)
-        print(f"[{idx+1}/{len(rules)}] ==> {cmd}")
-        
+        print(f"{Colors.BOLD}[{idx+1}/{total}]{Colors.ENDC} {cmd}")
         result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
         
         if result.returncode != 0:
             print_error_summary(result.stdout)
-            
             if VERBOSE:
-                print("----------------- FULL STDOUT -----------------", file=sys.stderr)
-                print(result.stdout, file=sys.stderr)
-                print("----------------- STDERR -----------------", file=sys.stderr)
-                print(result.stderr, file=sys.stderr)
+                print(f"\n{Colors.WARNING}------ FULL OUTPUT (STDOUT) ------{Colors.ENDC}")
+                print(result.stdout)
+                if result.stderr:
+                    print(f"\n{Colors.WARNING}------ STDERR ------{Colors.ENDC}")
+                    print(result.stderr, file=sys.stderr)
+            else:
+                # 提示用户可以使用 -v
+                print(f"\n{Colors.CYAN}(Run with -v to see the full log){Colors.ENDC}")
+                
             return False
     return True
-
-def rename_output(old_basename, new_name):
-    old_filename = f"{old_basename}.pdf"
-    if not os.path.exists(old_filename): return
-    if not new_name.endswith(".pdf"): new_name += ".pdf"
-    
-    print(f"Renaming '{old_filename}' to '{Colors.GREEN}{new_name}{Colors.ENDC}'...")
-    try:
-        os.rename(old_filename, new_name)
-    except OSError as e:
-        print(f"{Colors.FAIL}Error renaming file: {e}{Colors.ENDC}", file=sys.stderr)
 
 def load_config(work_dir):
     config = {}
@@ -238,47 +193,37 @@ def load_config(work_dir):
         try:
             with open(config_path, 'r', encoding='utf-8') as f:
                 for line in f:
-                    line = line.strip()
-                    if not line or line.startswith('#'): continue
-                    if '=' in line:
-                        key, val = line.split('=', 1)
-                        key = key.strip()
-                        val = val.strip()
-                        if key == 'tool_chain' and val.startswith('[') and val.endswith(']'):
-                            val = [x.strip() for x in val[1:-1].split(',')]
-                        config[key] = val
+                    line = line.split('#', 1)[0].strip()
+                    if not line or '=' not in line: continue
+                    key, val = line.split('=', 1)
+                    key, val = key.strip(), val.strip()
+                    if key == 'tool_chain':
+                        val = val.replace('[', '').replace(']', '')
+                        val = [x.strip() for x in val.split(',') if x.strip()]
+                    config[key] = val
         except Exception as e:
-            print(f"Warning: Failed to read .pdfmake: {e}", file=sys.stderr)
+            print(f"{Colors.WARNING}Warning: Failed to read .pdfmake: {e}{Colors.ENDC}", file=sys.stderr)
     return config
 
 def resolve_target(target_path):
     path = Path(target_path).resolve()
-    work_dir, file_basename, config = None, None, {}
-
     if path.is_dir():
-        work_dir = path
-        config = load_config(work_dir)
-        if 'main' in config:
-            file_basename = Path(config['main']).stem
-        else:
+        config = load_config(path)
+        basename = Path(config['main']).stem if 'main' in config else None
+        if not basename:
             tex_files = list(path.glob('*.tex'))
-            if len(tex_files) == 1:
-                file_basename = tex_files[0].stem
-            else:
-                print(f"{Colors.FAIL}Error: Ambiguous target. Use .pdfmake or specify file.{Colors.ENDC}", file=sys.stderr)
-                return None, None, {}
-    elif path.is_file() and path.suffix == '.tex':
-        work_dir = path.parent
-        file_basename = path.stem
-        config = load_config(work_dir)
-    else:
-        return None, None, {}
-    return str(work_dir), file_basename, config
+            if len(tex_files) == 1: basename = tex_files[0].stem
+            else: return str(path), None, config
+        return str(path), basename, config
+    elif path.suffix == '.tex':
+        return str(path.parent), path.stem, load_config(path.parent)
+    return None, None, {}
 
 def main():
     global VERBOSE
-    parser = argparse.ArgumentParser()
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument('target', nargs='?', default='.', help="Target dir or .tex file")
+    parser.add_argument('--init', action='store_true', help="Generate config template")
     parser.add_argument("-c", "--clean", action="store_true")
     parser.add_argument("-b", "--build", action="store_true")
     parser.add_argument("-bc", "--build-clean", action="store_true")
@@ -289,33 +234,44 @@ def main():
     args = parser.parse_args()
     VERBOSE = args.verbose
 
-    work_dir, file_basename, config = resolve_target(args.target)
-    if not work_dir: sys.exit(1)
+    if args.init:
+        create_template_config(); sys.exit(0)
 
+    work_dir, file_basename, config = resolve_target(args.target)
+    if not work_dir: print(f"{Colors.FAIL}Invalid target.{Colors.ENDC}"); sys.exit(1)
+    
     original_cwd = os.getcwd()
+    os.chdir(work_dir)
     try:
-        os.chdir(work_dir)
+        if not file_basename and not args.clean:
+             print(f"{Colors.FAIL}Error: No main file found.{Colors.ENDC}", file=sys.stderr); sys.exit(1)
+
         no_flags = not any([args.clean, args.build, args.build_clean, args.clean_build])
         do_build = args.build or args.build_clean or args.clean_build or no_flags
         
-        if args.clean_build or args.clean or no_flags: clean()
+        if args.clean_build or args.clean or (no_flags and not do_build): clean()
 
-        build_succeeded = False
-        if do_build:
+        success = False
+        if do_build and file_basename:
             rules = generate_build_rules(config, f"{file_basename}.tex")
-            build_succeeded = build(file_basename, rules)
+            success = build(file_basename, rules)
 
-        if args.build_clean and build_succeeded: clean()
+        if args.build_clean and success: clean()
 
         final_out = args.output if args.output else config.get('out')
-        if build_succeeded and final_out:
-            rename_output(file_basename, final_out)
+        if success and final_out:
+            src = f"{file_basename}.pdf"
+            dst = f"{final_out}.pdf" if not final_out.endswith('.pdf') else final_out
+            # 防止覆盖源文件
+            if dst.endswith('.tex'): 
+                 dst += ".pdf"
+            
+            if os.path.exists(src) and src != dst:
+                os.rename(src, dst)
+                print(f"Output: {Colors.GREEN}{dst}{Colors.ENDC}")
 
-    except Exception as e:
-        print(f"{Colors.FAIL}Error: {e}{Colors.ENDC}", file=sys.stderr)
     finally:
         os.chdir(original_cwd)
-        print("Done.")
 
 if __name__ == "__main__":
     main()
