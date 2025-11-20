@@ -107,7 +107,7 @@ def cmd_delete(args):
     print(f"{Colors.GREEN}Template '{args.name}' deleted.{Colors.ENDC}")
 
 def main():
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     subparsers = parser.add_subparsers(dest='command', required=True)
 
     # Register
