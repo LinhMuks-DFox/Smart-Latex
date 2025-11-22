@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Smart LaTeX Build Tool
+Smart LaTeX Build Tool (smlmk, sm-l-mk, smart latex make)
 ======================
 
 A configurable, automated build script for LaTeX projects.
@@ -38,7 +38,15 @@ import subprocess
 import argparse
 import sys
 import re
+import time
 from pathlib import Path
+
+try:
+    from watchdog.observers import Observer
+    from watchdog.events import FileSystemEventHandler
+except ImportError:
+    print(f"Error: 'watchdog' library not found. Please run 'pip install watchdog'", file=sys.stderr)
+    sys.exit(1)
 
 VERBOSE = False
 
@@ -161,7 +169,7 @@ def generate_build_rules(config, tex_file_path):
     return rules
 
 def build(file_basename, rules):
-    if not os.path.exists(f"{file_basename}.tex"):
+    if not Path(f"{file_basename}.tex").exists():
         print(f"{Colors.FAIL}Error: '{file_basename}.tex' not found.{Colors.ENDC}", file=sys.stderr)
         return False
     
@@ -219,6 +227,23 @@ def resolve_target(target_path):
         return str(path.parent), path.stem, load_config(path.parent)
     return None, None, {}
 
+class BuildHandler(FileSystemEventHandler):
+    def __init__(self, callback):
+        self.callback = callback
+        self.last_triggered = 0
+        self.debounce_interval = 0.5  # seconds
+
+    def on_any_event(self, event):
+        # Ignore changes to PDF files to avoid loops
+        if event.src_path.endswith('.pdf'):
+            return
+            
+        current_time = time.time()
+        if current_time - self.last_triggered > self.debounce_interval:
+            self.last_triggered = current_time
+            print(f"\n{Colors.CYAN}--- Detected change in {event.src_path}, rebuilding ---{Colors.ENDC}")
+            self.callback()
+
 def main():
     global VERBOSE
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -230,6 +255,7 @@ def main():
     parser.add_argument("-cb", "--clean-build", action="store_true")
     parser.add_argument("-o", "--output", help="Rename output PDF")
     parser.add_argument("-v", "--verbose", action="store_true")
+    parser.add_argument("-w", "--watch", action="store_true", help="Watch for file changes and rebuild automatically")
 
     args = parser.parse_args()
     VERBOSE = args.verbose
@@ -240,21 +266,25 @@ def main():
     work_dir, file_basename, config = resolve_target(args.target)
     if not work_dir: print(f"{Colors.FAIL}Invalid target.{Colors.ENDC}"); sys.exit(1)
     
-    original_cwd = os.getcwd()
+    original_cwd = Path.cwd()
     os.chdir(work_dir)
-    try:
-        if not file_basename and not args.clean:
-             print(f"{Colors.FAIL}Error: No main file found.{Colors.ENDC}", file=sys.stderr); sys.exit(1)
 
-        no_flags = not any([args.clean, args.build, args.build_clean, args.clean_build])
-        do_build = args.build or args.build_clean or args.clean_build or no_flags
+    def run_build_cycle():
+        if not file_basename and not args.clean:
+             print(f"{Colors.FAIL}Error: No main file found.{Colors.ENDC}", file=sys.stderr); return
         
-        if args.clean_build or args.clean or (no_flags and not do_build): clean()
+        no_flags = not any([args.clean, args.build, args.build_clean, args.clean_build, args.watch])
+        do_build = args.build or args.build_clean or args.clean_build or no_flags or args.watch
+
+        if args.clean_build or args.clean: clean()
 
         success = False
         if do_build and file_basename:
             rules = generate_build_rules(config, f"{file_basename}.tex")
             success = build(file_basename, rules)
+            if success:
+                print(f"{Colors.GREEN}================ BUILD SUCCEEDED ================{Colors.ENDC}")
+
 
         if args.build_clean and success: clean()
 
@@ -262,13 +292,36 @@ def main():
         if success and final_out:
             src = f"{file_basename}.pdf"
             dst = f"{final_out}.pdf" if not final_out.endswith('.pdf') else final_out
-            # 防止覆盖源文件
-            if dst.endswith('.tex'): 
-                 dst += ".pdf"
+            if dst.endswith('.tex'): dst += ".pdf"
             
-            if os.path.exists(src) and src != dst:
-                os.rename(src, dst)
+            if Path(src).exists() and src != dst:
+                Path(src).rename(dst)
                 print(f"Output: {Colors.GREEN}{dst}{Colors.ENDC}")
+    
+    try:
+        if args.watch:
+            if not file_basename:
+                print(f"{Colors.FAIL}Error: Cannot watch without a main file to build.{Colors.ENDC}", file=sys.stderr)
+                sys.exit(1)
+            
+            # Run once before watching
+            run_build_cycle()
+
+            event_handler = BuildHandler(run_build_cycle)
+            observer = Observer()
+            observer.schedule(event_handler, '.', recursive=True)
+            observer.start()
+            
+            print(f"\n{Colors.BOLD}{Colors.CYAN}Watching for file changes. Press Ctrl+C to stop.{Colors.ENDC}")
+            try:
+                while True:
+                    time.sleep(1)
+            except KeyboardInterrupt:
+                observer.stop()
+                print(f"\n{Colors.WARNING}Watcher stopped.{Colors.ENDC}")
+            observer.join()
+        else:
+            run_build_cycle()
 
     finally:
         os.chdir(original_cwd)

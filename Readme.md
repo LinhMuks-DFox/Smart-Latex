@@ -2,7 +2,7 @@
 
 > A frictionless CLI workflow for automated LaTeX compilation and project scaffolding.
 
-**Smart LaTeX Suite** eliminates the boilerplate of LaTeX project management. It consists of two decoupled tools: `smartlatex` for intelligent compilation and error parsing, and `latextemplates` for instant project scaffolding.
+**Smart LaTeX Suite** eliminates the boilerplate of LaTeX project management. It consists of two decoupled tools: `smlmk` for intelligent compilation and error parsing, and `smltt` for instant project scaffolding.
 
 ## ✨ Features
 
@@ -15,43 +15,70 @@
 
 ## 📦 Installation
 
-Place the scripts in your executable path:
+This project is packaged as a standard Python application. The recommended way to install these command-line tools is with `pipx`.
+
+### Recommended: `pipx`
+
+`pipx` installs Python applications in isolated environments, making them available globally without dependency conflicts.
 
 ```bash
-chmod +x smartlatex latextemplates
-sudo mv smartlatex /usr/local/bin/
-sudo mv latextemplates /usr/local/bin/
-````
+# 1. Install pipx (if you haven't already)
+python3 -m pip install --user pipx
+python3 -m pipx ensurepath
 
------
+# 2. Install the suite from the project's root directory
+pipx install .
+```
+
+### Alternative: `pip` in a Virtual Environment
+
+If you prefer to manage environments manually:
+
+```bash
+# 1. Create and activate a virtual environment
+python3 -m venv venv
+source venv/bin/activate
+
+# 2. Install the suite
+pip install .
+```
+
+---
 
 ## 🚀 Usage
 
-### 1\. The Builder (`smartlatex`)
+### 1. The Builder (`smlmk`)
 
 Run in any directory containing `.tex` files.
 
 | Command | Description |
 | :--- | :--- |
-| `smartlatex` | Auto-detect main file and build. |
-| `smartlatex -bc` | **Build** then **Clean** auxiliary files (Recommended). |
-| `smartlatex -v` | Verbose mode (shows full compiler log). |
-| `smartlatex --init` | Generate a `.pdfmake` config file. |
-| `smartlatex -o Paper`| Compile and rename output to `Paper.pdf`. |
+| `smlmk` | Auto-detect main file and build. |
+| `smlmk -w` | Watch for changes and rebuild automatically. |
+| `smlmk -bc` | **Build** then **Clean** auxiliary files (Recommended). |
+| `smlmk -v` | Verbose mode (shows full compiler log). |
+| `smlmk --init` | Generate a `.pdfmake` config file. |
+| `smlmk -o Paper`| Compile and rename output to `Paper.pdf`. |
 
-### 2\. The Manager (`latextemplates`)
+### 2. The Manager (`smltt`)
 
-Manage your local LaTeX templates (stored in `~/.smartlatex/templates`).
+Manage your local LaTeX templates (stored in `~/.smartlatex/templates` as zip files).
 
 ```bash
 # Register an existing directory as a template
-latextemplates register thesis-v1 ./my-thesis-folder
+smltt register thesis-v1 ./my-thesis-folder
 
 # Create a new project from template
-latextemplates new ./Fall2025-Paper -t thesis-v1
+smltt new ./Fall2025-Paper -t thesis-v1
 
 # List available templates
-latextemplates list
+smltt list
+
+# Update a template from a new source
+smltt update thesis-v1 ./my-new-thesis-folder
+
+# Delete a template
+smltt delete thesis-v1
 ```
 
 -----

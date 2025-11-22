@@ -1,15 +1,15 @@
 #!/usr/bin/env python3
 """
-Smart Latex Template Manager
+Smart Latex Template(sm-lt-t, smart latex template) Manager
 ============================
 
 Manages local LaTeX project templates.
 
 Usage:
-    smartlatex_template register <name> <path>
-    smartlatex_template list
-    smartlatex_template new <project_name> --template <name>
-    smartlatex_template delete <name>
+    smltt register <name> <path>
+    smltt list
+    smltt new <project_name> --template <name>
+    smltt delete <name>
 """
 
 import argparse
@@ -34,19 +34,20 @@ def init_store():
 def cmd_register(args):
     init_store()
     src_path = Path(args.path).resolve()
-    dest_path = TEMPLATE_STORE / args.name
+    dest_archive_base = TEMPLATE_STORE / args.name
+    dest_archive_path = str(dest_archive_base) + ".zip"
 
     if not src_path.exists() or not src_path.is_dir():
         print(f"{Colors.FAIL}Error: Source path '{src_path}' does not exist or is not a directory.{Colors.ENDC}")
         sys.exit(1)
 
-    if dest_path.exists():
+    if Path(dest_archive_path).exists():
         print(f"{Colors.FAIL}Error: Template '{args.name}' already exists.{Colors.ENDC}")
         sys.exit(1)
 
     try:
-        # 忽略 .git 文件夹等不需要的文件
-        shutil.copytree(src_path, dest_path, ignore=shutil.ignore_patterns('.git', '__pycache__', '*.pdf', 'build'))
+        # shutil.make_archive will create a zip file at dest_archive_path
+        shutil.make_archive(str(dest_archive_base), 'zip', str(src_path))
         print(f"{Colors.GREEN}Template '{args.name}' registered successfully.{Colors.ENDC}")
     except Exception as e:
         print(f"{Colors.FAIL}Error registering template: {e}{Colors.ENDC}")
@@ -54,10 +55,10 @@ def cmd_register(args):
 
 def cmd_new(args):
     init_store()
-    template_path = TEMPLATE_STORE / args.template
+    template_archive = TEMPLATE_STORE / f"{args.template}.zip"
     project_path = Path(args.project_name).resolve()
 
-    if not template_path.exists():
+    if not template_archive.exists():
         print(f"{Colors.FAIL}Error: Template '{args.template}' not found.{Colors.ENDC}")
         print(f"Run 'list' to see available templates.")
         sys.exit(1)
@@ -68,7 +69,7 @@ def cmd_new(args):
 
     try:
         print(f"Creating project '{args.project_name}' from template '{args.template}'...")
-        shutil.copytree(template_path, project_path)
+        shutil.unpack_archive(str(template_archive), str(project_path), 'zip')
         
         # 确保 assets 目录存在
         assets_dir = project_path / "assets"
@@ -80,7 +81,7 @@ def cmd_new(args):
         if (project_path / ".pdfmake").exists():
             print("Note: Included .pdfmake configuration.")
         else:
-            print("Note: No .pdfmake found in template. Run `muxpdfmk --init` inside the folder to generate one.")
+            print("Note: No .pdfmake found in template. Run `smartlatex --init` inside the folder to generate one.")
 
     except Exception as e:
         print(f"{Colors.FAIL}Error creating project: {e}{Colors.ENDC}")
@@ -88,7 +89,7 @@ def cmd_new(args):
 
 def cmd_list(args):
     init_store()
-    templates = [d.name for d in TEMPLATE_STORE.iterdir() if d.is_dir()]
+    templates = [p.stem for p in TEMPLATE_STORE.glob('*.zip') if p.is_file()]
     if not templates:
         print("No templates registered.")
     else:
@@ -98,13 +99,38 @@ def cmd_list(args):
 
 def cmd_delete(args):
     init_store()
-    target = TEMPLATE_STORE / args.name
+    target = TEMPLATE_STORE / f"{args.name}.zip"
     if not target.exists():
         print(f"{Colors.FAIL}Template '{args.name}' not found.{Colors.ENDC}")
         sys.exit(1)
     
-    shutil.rmtree(target)
+    target.unlink() # os.remove(target)
     print(f"{Colors.GREEN}Template '{args.name}' deleted.{Colors.ENDC}")
+
+def cmd_update(args):
+    init_store()
+    template_archive = TEMPLATE_STORE / f"{args.name}.zip"
+    src_path = Path(args.path).resolve()
+
+    if not template_archive.exists():
+        print(f"{Colors.FAIL}Template '{args.name}' not found. Cannot update.{Colors.ENDC}")
+        sys.exit(1)
+    
+    if not src_path.exists() or not src_path.is_dir():
+        print(f"{Colors.FAIL}Error: New source path '{src_path}' does not exist or is not a directory.{Colors.ENDC}")
+        sys.exit(1)
+
+    try:
+        # Delete old archive
+        template_archive.unlink()
+        
+        # Create new one
+        dest_archive_base = TEMPLATE_STORE / args.name
+        shutil.make_archive(str(dest_archive_base), 'zip', str(src_path))
+        print(f"{Colors.GREEN}Template '{args.name}' updated successfully.{Colors.ENDC}")
+    except Exception as e:
+        print(f"{Colors.FAIL}Error updating template: {e}{Colors.ENDC}")
+        sys.exit(1)
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
@@ -130,6 +156,12 @@ def main():
     p_del = subparsers.add_parser('delete', help='Delete a registered template')
     p_del.add_argument('name', help='Name of the template to delete')
     p_del.set_defaults(func=cmd_delete)
+
+    # Update
+    p_upd = subparsers.add_parser('update', help='Update an existing template from a new path')
+    p_upd.add_argument('name', help='Name of the template to update')
+    p_upd.add_argument('path', help='Path to the new source directory')
+    p_upd.set_defaults(func=cmd_update)
 
     args = parser.parse_args()
     args.func(args)
