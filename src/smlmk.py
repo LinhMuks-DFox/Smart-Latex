@@ -205,7 +205,7 @@ def load_config(work_dir):
                     if not line or '=' not in line: continue
                     key, val = line.split('=', 1)
                     key, val = key.strip(), val.strip()
-                    if key == 'tool_chain':
+                    if key in ['tool_chain', 'main', 'out']:
                         val = val.replace('[', '').replace(']', '')
                         val = [x.strip() for x in val.split(',') if x.strip()]
                     config[key] = val
@@ -217,14 +217,24 @@ def resolve_target(target_path):
     path = Path(target_path).resolve()
     if path.is_dir():
         config = load_config(path)
-        basename = Path(config['main']).stem if 'main' in config else None
-        if not basename:
+        basenames = None
+        if 'main' in config:
+            main_files = config['main']
+            if isinstance(main_files, list):
+                basenames = [Path(f).stem for f in main_files]
+            else: # Should not happen with new load_config, but good for robustness
+                basenames = [Path(main_files).stem]
+        else:
             tex_files = list(path.glob('*.tex'))
-            if len(tex_files) == 1: basename = tex_files[0].stem
-            else: return str(path), None, config
-        return str(path), basename, config
+            if len(tex_files) == 1:
+                basenames = [tex_files[0].stem]
+        
+        if not basenames:
+            return str(path), None, config
+        return str(path), basenames, config
     elif path.suffix == '.tex':
-        return str(path.parent), path.stem, load_config(path.parent)
+        # When a single .tex file is specified, it's the only target.
+        return str(path.parent), [path.stem], load_config(path.parent)
     return None, None, {}
 
 class BuildHandler(FileSystemEventHandler):
@@ -253,7 +263,7 @@ def main():
     parser.add_argument("-b", "--build", action="store_true")
     parser.add_argument("-bc", "--build-clean", action="store_true")
     parser.add_argument("-cb", "--clean-build", action="store_true")
-    parser.add_argument("-o", "--output", help="Rename output PDF")
+    parser.add_argument("-o", "--output", help="Rename output PDF (only for single target builds)")
     parser.add_argument("-v", "--verbose", action="store_true")
     parser.add_argument("-w", "--watch", action="store_true", help="Watch for file changes and rebuild automatically")
 
@@ -263,44 +273,97 @@ def main():
     if args.init:
         create_template_config(); sys.exit(0)
 
-    work_dir, file_basename, config = resolve_target(args.target)
+    work_dir, file_basenames, config = resolve_target(args.target)
     if not work_dir: print(f"{Colors.FAIL}Invalid target.{Colors.ENDC}"); sys.exit(1)
     
     original_cwd = Path.cwd()
     os.chdir(work_dir)
 
     def run_build_cycle():
-        if not file_basename and not args.clean:
+        if not file_basenames and not args.clean:
              print(f"{Colors.FAIL}Error: No main file found.{Colors.ENDC}", file=sys.stderr); return
-        
+
         no_flags = not any([args.clean, args.build, args.build_clean, args.clean_build, args.watch])
         do_build = args.build or args.build_clean or args.clean_build or no_flags or args.watch
 
         if args.clean_build or args.clean: clean()
 
-        success = False
-        if do_build and file_basename:
-            rules = generate_build_rules(config, f"{file_basename}.tex")
-            success = build(file_basename, rules)
+        if not do_build: return
+
+        # Target validation and pairing
+        main_files = file_basenames
+        out_files = config.get('out', [])
+        
+        if args.output and len(main_files) > 1:
+            print(f"{Colors.FAIL}Error: -o/--output cannot be used with multiple main files.{Colors.ENDC}")
+            sys.exit(1)
+
+        if out_files and isinstance(out_files, list) and len(out_files) > 0 and len(main_files) != len(out_files):
+            print(f"{Colors.FAIL}Error: Mismatch between number of main files ({len(main_files)}) and out files ({len(out_files)}).{Colors.ENDC}")
+            sys.exit(1)
+
+        # Create build jobs
+        jobs = []
+        if main_files:
+            for i, basename in enumerate(main_files):
+                final_out = None
+                if args.output:
+                    final_out = args.output
+                elif out_files and isinstance(out_files, list) and i < len(out_files):
+                    final_out = out_files[i]
+                jobs.append({'basename': basename, 'out': final_out})
+        
+        total_success = True
+        for job in jobs:
+            basename = job['basename']
+            final_out = job['out']
+            
+            effective_output_pdf_name = f"{basename}.pdf"
+            if final_out:
+                if final_out.lower().endswith('.pdf'):
+                    effective_output_pdf_name = final_out
+                elif final_out.lower().endswith('.tex'):
+                    effective_output_pdf_name = f"{final_out[:-4]}.pdf"
+                else:
+                    effective_output_pdf_name = f"{final_out}.pdf"
+            debug(f"Compiling {basename}.tex to {effective_output_pdf_name}")
+            
+            print(f"\n{Colors.HEADER}--- Building Target: {basename}.tex ---{Colors.ENDC}")
+            
+            rules = generate_build_rules(config, f"{basename}.tex")
+            success = build(basename, rules)
+            
             if success:
                 print(f"{Colors.GREEN}================ BUILD SUCCEEDED ================{Colors.ENDC}")
-
-
-        if args.build_clean and success: clean()
-
-        final_out = args.output if args.output else config.get('out')
-        if success and final_out:
-            src = f"{file_basename}.pdf"
-            dst = f"{final_out}.pdf" if not final_out.endswith('.pdf') else final_out
-            if dst.endswith('.tex'): dst += ".pdf"
-            
-            if Path(src).exists() and src != dst:
-                Path(src).rename(dst)
-                print(f"Output: {Colors.GREEN}{dst}{Colors.ENDC}")
+                if args.build_clean:
+                    # Defer cleaning until all builds are done if -bc is used
+                    pass 
+                
+                if final_out:
+                    src = f"{basename}.pdf"
+                    # Ensure dst always ends with .pdf
+                    if final_out.lower().endswith('.pdf'):
+                        dst = final_out
+                    elif final_out.lower().endswith('.tex'):
+                        dst = f"{final_out[:-4]}.pdf"
+                    else:
+                        dst = f"{final_out}.pdf"
+                    
+                    if Path(src).exists() and Path(src).name != Path(dst).name:
+                        Path(src).rename(dst)
+                        print(f"Output: {Colors.GREEN}{dst}{Colors.ENDC}")
+            else:
+                total_success = False
+                # Stop on first failure
+                break
+        
+        # Post-build actions
+        if args.build_clean and total_success:
+            clean()
     
     try:
         if args.watch:
-            if not file_basename:
+            if not file_basenames:
                 print(f"{Colors.FAIL}Error: Cannot watch without a main file to build.{Colors.ENDC}", file=sys.stderr)
                 sys.exit(1)
             
