@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "smart-latex-suite"
-version = "1.0.0"
+version = "1.1.0"
 description = "A collection of command-line tools to simplify and automate the LaTeX workflow."
 readme = "Readme.md"
 requires-python = ">=3.8"
@@ -20,11 +20,14 @@ classifiers = [
 ]
 dependencies = [
     "watchdog",
+    "pyyaml",
 ]
 
 [project.scripts]
 smlmk = "smlmk:main"
 smltt = "smltt:main"
+smlpdtp = "smlp:main_dtp"
+smlptk = "smlp:main_tk"
 
 [tool.setuptools]
 package-dir = {"" = "src"}

@@ -7,7 +7,7 @@ A configurable, automated build script for LaTeX projects.
 
 Features:
     1. **Auto-Detection**: Detects `%!TEX program` magic comments.
-    2. **Configuration**: Per-directory `.pdfmake` config files.
+    2. **Configuration**: Per-directory `.smlconfig` (YAML) files; legacy `.pdfmake` still read.
     3. **Error Parsing**: Filters LaTeX log noise.
     4. **Workflow**: Handles clean/build cycles and DVI->PDF.
 
@@ -16,22 +16,28 @@ Usage:
 
 Arguments:
     TARGET           Directory or .tex file. (Defaults to current dir)
-    --init           Create a template .pdfmake config file in current dir.
+    --init           Create a template .smlconfig file in current dir.
     -c, --clean      Clean auxiliary files.
     -b, --build      Execute build.
-    -bc              Build then clean.
-    -cb              Clean then build.
+    -s, --synctex    Pass -synctex=1 to the TeX engine; keeps *.synctex.gz on clean.
     -o NAME          Rename final PDF.
     -v               Verbose debug logging.
+    -w, --watch      Rebuild on file change.
 
-Configuration File (.pdfmake):
-    key=value format. Comments start with #.
-    
-    main=main.tex
-    out=FinalPaper
-    compiler=xelatex
-    # Simple comma-separated list for tool chain:
-    tool_chain=xelatex, biber, xelatex, xelatex
+    Short flags combine like tar: -bs, -bc, -bcs, -bsw.
+    Combined flags carry no order: -bc and -cb both mean "build, then clean".
+    --clean-build    Clean first, then build (the only way to clean before building).
+
+Configuration File (.smlconfig, YAML, one section per command):
+
+    smlmk:
+      main: main.tex
+      out: FinalPaper
+      compiler: xelatex
+      tool_chain: [xelatex, biber, xelatex, xelatex]
+
+    The legacy `.pdfmake` (key=value, `#` comments) is still read when no
+    `.smlconfig` exists. Shared loader: smlcore.py.
 """
 import os
 import subprocess
@@ -40,6 +46,8 @@ import sys
 import re
 import time
 from pathlib import Path
+
+from smlcore import Colors, CONFIG_NAME, LEGACY_NAME, SMLCONFIG_TEMPLATE, load_config as _load_all_sections, smlmk_section
 
 try:
     from watchdog.observers import Observer
@@ -50,16 +58,6 @@ except ImportError:
 
 VERBOSE = False
 
-class Colors:
-    HEADER = '\033[95m'
-    BLUE = '\033[94m'
-    CYAN = '\033[96m'
-    GREEN = '\033[92m'
-    WARNING = '\033[93m'
-    FAIL = '\033[91m'
-    ENDC = '\033[0m'
-    BOLD = '\033[1m'
-
 def debug(msg):
     if VERBOSE:
         print(f"{Colors.BLUE}[DEBUG] {msg}{Colors.ENDC}", file=sys.stderr)
@@ -69,11 +67,18 @@ TOOL_MAP = {
     "xelatex":  "xelatex -file-line-error -interaction=nonstopmode {file}.tex",
     "lualatex": "lualatex -file-line-error -interaction=nonstopmode {file}.tex",
     "latex":    "latex -file-line-error -interaction=nonstopmode {file}.tex",
+    "uplatex":  "uplatex -file-line-error -interaction=nonstopmode -kanji=utf8 -synctex=1 {file}.tex",
+    "platex":   "platex -file-line-error -interaction=nonstopmode -synctex=1 {file}.tex",
     "dvipdfmx": "dvipdfmx {file}",
     "biber":    "biber {file}",
     "bibtex":   "bibtex {file}",
+    "upbibtex": "upbibtex {file}",
     "makeglossaries": "makeglossaries {file}"
 }
+
+# TeX engines that accept -synctex=1 (uplatex/platex already carry it in TOOL_MAP).
+TEX_ENGINES = {"pdflatex", "xelatex", "lualatex", "latex", "uplatex", "platex"}
+SYNCTEX_PATTERN = "*.synctex.gz"
 
 clean_files = [
     "*.aux", "*.bbl", "*.blg", "*.dvi", "*.out", "*.log", "*.toc",
@@ -83,18 +88,18 @@ clean_files = [
 ]
 
 def create_template_config():
-    content = """# .pdfmake configuration file
-main=main.tex
-# out=FinalPaper
-# tool_chain = xelatex, bibtex, xelatex, xelatex
-"""
-    p = Path(".pdfmake")
+    p = Path(CONFIG_NAME)
     if p.exists():
-        print(f"{Colors.WARNING}File .pdfmake already exists. Skipping.{Colors.ENDC}")
+        print(f"{Colors.WARNING}File {CONFIG_NAME} already exists. Skipping.{Colors.ENDC}")
+    elif Path(LEGACY_NAME).exists():
+        # A fresh .smlconfig would take precedence over the legacy file and silently
+        # drop its main/out/tool_chain; leave the migration to the user.
+        print(f"{Colors.WARNING}Found legacy {LEGACY_NAME}; it stays in effect. Not writing {CONFIG_NAME}: "
+              f"move its keys under `smlmk:` in a new {CONFIG_NAME} yourself, then delete {LEGACY_NAME}.{Colors.ENDC}")
     else:
         with open(p, "w", encoding="utf-8") as f:
-            f.write(content)
-        print(f"{Colors.GREEN}Created template .pdfmake{Colors.ENDC}")
+            f.write(SMLCONFIG_TEMPLATE)
+        print(f"{Colors.GREEN}Created template {CONFIG_NAME}{Colors.ENDC}")
 
 def clean(rules=clean_files):
     print(f"{Colors.CYAN}Cleaning auxiliary files...{Colors.ENDC}")
@@ -134,7 +139,7 @@ def detect_compiler(tex_file_path):
         pass
     return "pdflatex"
 
-def generate_build_rules(config, tex_file_path):
+def generate_build_rules(config, tex_file_path, synctex=False):
     # 1. 获取基础编译器（检测 或 配置指定）
     detected = detect_compiler(tex_file_path)
     compiler = config.get('compiler', detected)
@@ -164,7 +169,10 @@ def generate_build_rules(config, tex_file_path):
             real_tool = tool
         
         # 如果工具在 MAP 里则取 MAP，否则认为是一个直接命令
-        rules.append(TOOL_MAP.get(real_tool, f"{real_tool} {{file}}"))
+        cmd = TOOL_MAP.get(real_tool, f"{real_tool} {{file}}")
+        if synctex and real_tool in TEX_ENGINES and "-synctex" not in cmd:
+            cmd = cmd.replace(" {file}.tex", " -synctex=1 {file}.tex")
+        rules.append(cmd)
         
     return rules
 
@@ -177,7 +185,7 @@ def build(file_basename, rules):
     for idx, rule in enumerate(rules):
         cmd = rule.format(file=file_basename)
         print(f"{Colors.BOLD}[{idx+1}/{total}]{Colors.ENDC} {cmd}")
-        result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
+        result = subprocess.run(cmd, shell=True, capture_output=True, text=True, errors='replace')
         
         if result.returncode != 0:
             print_error_summary(result.stdout)
@@ -195,23 +203,8 @@ def build(file_basename, rules):
     return True
 
 def load_config(work_dir):
-    config = {}
-    config_path = Path(work_dir) / ".pdfmake"
-    if config_path.is_file():
-        try:
-            with open(config_path, 'r', encoding='utf-8') as f:
-                for line in f:
-                    line = line.split('#', 1)[0].strip()
-                    if not line or '=' not in line: continue
-                    key, val = line.split('=', 1)
-                    key, val = key.strip(), val.strip()
-                    if key in ['tool_chain', 'main', 'out']:
-                        val = val.replace('[', '').replace(']', '')
-                        val = [x.strip() for x in val.split(',') if x.strip()]
-                    config[key] = val
-        except Exception as e:
-            print(f"{Colors.WARNING}Warning: Failed to read .pdfmake: {e}{Colors.ENDC}", file=sys.stderr)
-    return config
+    """smlmk's section of .smlconfig (or the legacy .pdfmake), main/out/tool_chain as lists."""
+    return smlmk_section(_load_all_sections(work_dir))
 
 def resolve_target(target_path):
     path = Path(target_path).resolve()
@@ -259,10 +252,13 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument('target', nargs='?', default='.', help="Target dir or .tex file")
     parser.add_argument('--init', action='store_true', help="Generate config template")
-    parser.add_argument("-c", "--clean", action="store_true")
-    parser.add_argument("-b", "--build", action="store_true")
-    parser.add_argument("-bc", "--build-clean", action="store_true")
-    parser.add_argument("-cb", "--clean-build", action="store_true")
+    parser.add_argument("-c", "--clean", action="store_true", help="Clean auxiliary files")
+    parser.add_argument("-b", "--build", action="store_true", help="Execute build")
+    parser.add_argument("-s", "--synctex", action="store_true",
+                        help="Pass -synctex=1 to the TeX engine; keeps *.synctex.gz when cleaning")
+    # No short forms: -bc/-cb are now plain letter combinations of -b and -c.
+    parser.add_argument("--build-clean", action="store_true", help="Build, then clean")
+    parser.add_argument("--clean-build", action="store_true", help="Clean, then build")
     parser.add_argument("-o", "--output", help="Rename output PDF (only for single target builds)")
     parser.add_argument("-v", "--verbose", action="store_true")
     parser.add_argument("-w", "--watch", action="store_true", help="Watch for file changes and rebuild automatically")
@@ -286,7 +282,18 @@ def main():
         no_flags = not any([args.clean, args.build, args.build_clean, args.clean_build, args.watch])
         do_build = args.build or args.build_clean or args.clean_build or no_flags or args.watch
 
-        if args.clean_build or args.clean: clean()
+        # Letter combinations carry no order, so -bc and -cb both clean after the build.
+        # --clean-build is the explicit "clean first" form.
+        clean_first = args.clean_build or (args.clean and not do_build)
+        clean_last = args.build_clean or (args.clean and do_build)
+
+        def clean_rules():
+            # Cleaning away the synctex file would defeat -s (reverse search needs it).
+            if args.synctex:
+                return [pat for pat in clean_files if pat != SYNCTEX_PATTERN]
+            return clean_files
+
+        if clean_first: clean(clean_rules())
 
         if not do_build: return
 
@@ -330,7 +337,7 @@ def main():
             
             print(f"\n{Colors.HEADER}--- Building Target: {basename}.tex ---{Colors.ENDC}")
             
-            rules = generate_build_rules(config, f"{basename}.tex")
+            rules = generate_build_rules(config, f"{basename}.tex", synctex=args.synctex)
             success = build(basename, rules)
             
             if success:
@@ -358,8 +365,8 @@ def main():
                 break
         
         # Post-build actions
-        if args.build_clean and total_success:
-            clean()
+        if clean_last and total_success:
+            clean(clean_rules())
     
     try:
         if args.watch:
