@@ -60,6 +60,7 @@ Run in any directory containing `.tex` files.
 | `smlmk -bc` | **Build** then **Clean** auxiliary files (Recommended). |
 | `smlmk -v` | Verbose mode (shows full compiler log). |
 | `smlmk --init` | Generate a `.smlconfig` template. |
+| `smlmk --upgrade-config [DIR]` | Convert a legacy `.pdfmake` into `.smlconfig` (old file kept as `.pdfmake.bak`). Refuses if `.smlconfig` or `.pdfmake.bak` already exists, or if the file is not UTF-8. Standalone like `--init`. |
 | `smlmk -o Paper`| Compile and rename output to `Paper.pdf`. |
 
 ### 2. The Manager (`smltt`)
@@ -172,7 +173,7 @@ smlptk:
 ```
 
 **Legacy `.pdfmake`** (`key=value`, `#` comments, smlmk only) is still read when no `.smlconfig` exists;
-if both are present `.smlconfig` wins and a warning is printed.
+if both are present `.smlconfig` wins and a warning is printed. `smlmk --upgrade-config` converts it in place (the original is renamed `.pdfmake.bak`).
 
 ```ini
 main = main.tex

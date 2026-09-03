@@ -218,6 +218,79 @@ class Resolve(unittest.TestCase):
             (pathlib.Path(d) / ".pdfmake").write_bytes(b"\xff\xfemain=x\n")
             self.assertEqual(smlcore.load_config(d), {"smlmk": {}})
 
+    def test_upgrade_config_round_trip(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = pathlib.Path(d)
+            (p / ".pdfmake").write_text(
+                "# old config\nmain=main.tex\nout=Final: v2 \"draft\"\ntool_chain = xelatex, biber, xelatex\ncompiler=xelatex\n",
+                encoding="utf-8")
+            new, backup = smlcore.upgrade_config(d)
+            self.assertEqual((new.name, backup.name), (".smlconfig", ".pdfmake.bak"))
+            self.assertFalse((p / ".pdfmake").exists())
+            sec = smlcore.smlmk_section(smlcore.load_config(d))
+            self.assertEqual(sec["main"], ["main.tex"])
+            self.assertEqual(sec["out"], ['Final: v2 "draft"'])       # YAML quoting survived
+            self.assertEqual(sec["tool_chain"], ["xelatex", "biber", "xelatex"])
+            self.assertEqual(sec["compiler"], "xelatex")
+            with self.assertRaises(SystemExit):                       # .smlconfig now exists
+                smlcore.upgrade_config(d)
+
+    def test_upgrade_config_without_pdfmake_is_fatal(self):
+        with tempfile.TemporaryDirectory() as d:
+            with self.assertRaises(SystemExit):
+                smlcore.upgrade_config(d)
+
+    def test_upgrade_config_edge_cases(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = pathlib.Path(d)
+            (p / ".pdfmake").write_text("# only a comment\n", encoding="utf-8")
+            new, backup = smlcore.upgrade_config(d)                  # empty -> empty section, still migrated
+            self.assertEqual(smlcore.load_config(d), {"smlmk": {}})
+            self.assertTrue(backup.exists())
+            new.unlink()
+            (p / ".pdfmake").write_text("main=main.tex\n", encoding="utf-8")
+            with self.assertRaises(SystemExit):                       # .pdfmake.bak already exists
+                smlcore.upgrade_config(d)
+            backup.unlink()
+            (p / ".pdfmake").write_bytes(b"main=main.tex\nout=caf\xe9\n")
+            with self.assertRaises(SystemExit):                       # not UTF-8: refused, file untouched
+                smlcore.upgrade_config(d)
+            self.assertTrue((p / ".pdfmake").exists())
+            self.assertFalse((p / ".smlconfig").exists())
+
+    def test_utf8_bom_does_not_corrupt_first_key(self):
+        with tempfile.TemporaryDirectory() as d:
+            p = pathlib.Path(d)
+            (p / ".pdfmake").write_bytes(b"\xef\xbb\xbfmain=main.tex\nout=paper\n")
+            self.assertEqual(smlcore.smlmk_section(smlcore.load_config(d))["main"], ["main.tex"])
+            new, _ = smlcore.upgrade_config(d)
+            self.assertIn("main: main.tex", new.read_text(encoding="utf-8"))
+            new.write_bytes(b"\xef\xbb\xbfsmlmk:\n  main: x.tex\n")
+            self.assertEqual(smlcore.smlmk_section(smlcore.load_config(d))["main"], ["x.tex"])
+
+    def test_upgrade_config_cli(self):
+        import smlmk
+
+        def run(argv):
+            old = sys.argv
+            sys.argv = ["smlmk"] + argv
+            try:
+                smlmk.main()
+            except SystemExit as e:
+                return e.code
+            finally:
+                sys.argv = old
+            return 0
+
+        with tempfile.TemporaryDirectory() as d:
+            p = pathlib.Path(d)
+            (p / ".pdfmake").write_text("main=main.tex\n", encoding="utf-8")
+            self.assertEqual(run(["--upgrade-config", str(p / "does-not-exist")]), 1)   # bad TARGET: no silent cwd fallback
+            self.assertFalse((p / ".smlconfig").exists())
+            self.assertEqual(run(["--upgrade-config", d]), 0)
+            self.assertTrue((p / ".smlconfig").exists() and (p / ".pdfmake.bak").exists())
+            self.assertEqual(run(["--init", "--upgrade-config", d]), 2)                  # mutually exclusive (argparse)
+
     def test_init_refuses_to_shadow_legacy_pdfmake(self):
         import os, smlmk
         with tempfile.TemporaryDirectory() as d:

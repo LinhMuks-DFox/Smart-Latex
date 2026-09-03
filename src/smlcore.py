@@ -75,24 +75,27 @@ def as_list(value):
     return [x.strip() for x in text.split(',') if x.strip()]
 
 
-def _parse_pdfmake(path):
-    """Legacy `.pdfmake`: key=value lines, `#` comments. Returns the smlmk section.
-
-    Unreadable file -> warning and empty section (the historical smlmk behaviour:
-    build with defaults rather than abort)."""
+def _parse_pdfmake_text(text):
+    """Legacy `.pdfmake` syntax: key=value lines, `#` comments. Returns the smlmk section."""
     section = {}
+    for line in text.splitlines():
+        line = line.split('#', 1)[0].strip()
+        if not line or '=' not in line:
+            continue
+        key, val = line.split('=', 1)
+        section[key.strip()] = val.strip()
+    return section
+
+
+def _parse_pdfmake(path):
+    """Read a legacy `.pdfmake`. Unreadable file -> warning and empty section (the
+    historical smlmk behaviour: build with defaults rather than abort)."""
     try:
-        with open(path, 'r', encoding='utf-8') as f:
-            for line in f:
-                line = line.split('#', 1)[0].strip()
-                if not line or '=' not in line:
-                    continue
-                key, val = line.split('=', 1)
-                section[key.strip()] = val.strip()
+        text = Path(path).read_text(encoding='utf-8-sig')   # -sig: a UTF-8 BOM must not become part of the first key
     except (OSError, UnicodeDecodeError) as e:
         warn(f"failed to read {path}: {e}; ignoring it")
         return {}
-    return section
+    return _parse_pdfmake_text(text)
 
 
 def _parse_smlconfig(path):
@@ -102,7 +105,7 @@ def _parse_smlconfig(path):
         fail("'pyyaml' is required to read .smlconfig. Reinstall the suite "
              "(pipx install --force .) or run 'pip install pyyaml'.")
     try:
-        with open(path, 'r', encoding='utf-8') as f:
+        with open(path, 'r', encoding='utf-8-sig') as f:
             data = yaml.safe_load(f)
     except (OSError, UnicodeDecodeError) as e:
         fail(f"{path}: cannot read: {e}")
@@ -152,6 +155,52 @@ def smlmk_section(config):
         if key in section:
             section[key] = as_list(section[key])
     return section
+
+
+def upgrade_config(work_dir):
+    """Convert the legacy `.pdfmake` in `work_dir` into `.smlconfig`; the old file is kept as `.pdfmake.bak`.
+
+    Returns (new_path, backup_path). Values go through yaml.safe_dump so that
+    colons, quotes and other YAML-significant characters survive the move.
+    Refuses when `.smlconfig` or `.pdfmake.bak` already exists, or when the
+    legacy file is not UTF-8; a legacy file without key=value lines becomes an
+    empty `smlmk:` section (smlmk then builds with its defaults, as before).
+    """
+    d = Path(work_dir)
+    legacy, new = d / LEGACY_NAME, d / CONFIG_NAME
+    backup = d / (LEGACY_NAME + ".bak")
+    if new.exists():
+        fail(f"{new} already exists; delete or merge it first")
+    if not legacy.is_file():
+        fail(f"no {LEGACY_NAME} in {d} to upgrade")
+    if backup.exists():
+        fail(f"{backup} already exists (from an earlier upgrade); remove or rename it first")
+    try:
+        text = legacy.read_text(encoding="utf-8-sig")
+    except UnicodeDecodeError as e:
+        fail(f"{legacy}: not UTF-8 text ({e}); convert its encoding, then rerun")
+    except OSError as e:
+        fail(f"{legacy}: cannot read: {e}")
+    section = _parse_pdfmake_text(text)
+    if not section:
+        warn(f"{legacy} has no key=value entries; writing an empty `smlmk:` section")
+    for key in ("main", "out"):
+        if key in section:
+            values = as_list(section[key])
+            section[key] = values[0] if len(values) == 1 else values
+    if "tool_chain" in section:
+        section["tool_chain"] = as_list(section["tool_chain"])
+    import yaml
+    body = yaml.safe_dump({"smlmk": section}, sort_keys=False, allow_unicode=True, default_flow_style=False)
+    new.write_text(f"# .smlconfig — migrated from {LEGACY_NAME} by `smlmk --upgrade-config`\n"
+                   f"# (one section per command; see `smlmk --init` for the smlpdtp / smlptk keys)\n" + body,
+                   encoding="utf-8")
+    try:
+        legacy.rename(backup)
+    except OSError as e:
+        fail(f"wrote {new} but could not rename {legacy} to {backup.name}: {e}. "
+             f"Both files now exist and {CONFIG_NAME} takes precedence; rename or delete {LEGACY_NAME} by hand.")
+    return new, backup
 
 
 SMLCONFIG_TEMPLATE = """# .smlconfig — smart-latex-suite configuration (YAML, one section per command)

@@ -17,6 +17,9 @@ Usage:
 Arguments:
     TARGET           Directory or .tex file. (Defaults to current dir)
     --init           Create a template .smlconfig file in current dir.
+    --upgrade-config Convert the legacy .pdfmake of TARGET into .smlconfig (old file kept as .pdfmake.bak;
+                     refuses if .smlconfig or .pdfmake.bak exists). --init and --upgrade-config are
+                     standalone and mutually exclusive; build/clean flags given with them are ignored.
     -c, --clean      Clean auxiliary files.
     -b, --build      Execute build.
     -s, --synctex    Pass -synctex=1 to the TeX engine; keeps *.synctex.gz on clean.
@@ -47,7 +50,7 @@ import re
 import time
 from pathlib import Path
 
-from smlcore import Colors, CONFIG_NAME, LEGACY_NAME, SMLCONFIG_TEMPLATE, load_config as _load_all_sections, smlmk_section
+from smlcore import Colors, CONFIG_NAME, LEGACY_NAME, SMLCONFIG_TEMPLATE, load_config as _load_all_sections, smlmk_section, upgrade_config
 
 try:
     from watchdog.observers import Observer
@@ -251,7 +254,11 @@ def main():
     global VERBOSE
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument('target', nargs='?', default='.', help="Target dir or .tex file")
-    parser.add_argument('--init', action='store_true', help="Generate config template")
+    actions = parser.add_mutually_exclusive_group()   # standalone actions: they exit before any build flag is read
+    actions.add_argument('--init', action='store_true', help=f"Generate a {CONFIG_NAME} template in the current dir and exit")
+    actions.add_argument('--upgrade-config', action='store_true',
+                         help=f"Convert the legacy {LEGACY_NAME} of TARGET into {CONFIG_NAME} (old file kept as "
+                              f"{LEGACY_NAME}.bak; refuses if {CONFIG_NAME} or the .bak already exists) and exit")
     parser.add_argument("-c", "--clean", action="store_true", help="Clean auxiliary files")
     parser.add_argument("-b", "--build", action="store_true", help="Execute build")
     parser.add_argument("-s", "--synctex", action="store_true",
@@ -268,6 +275,19 @@ def main():
 
     if args.init:
         create_template_config(); sys.exit(0)
+    if args.upgrade_config:
+        target = Path(args.target)
+        if target.is_dir():
+            work = target
+        elif target.is_file():
+            work = target.parent
+        else:
+            print(f"{Colors.FAIL}Invalid target: {target}{Colors.ENDC}", file=sys.stderr); sys.exit(1)
+        new_cfg, backup = upgrade_config(work)
+        print(f"{Colors.GREEN}Wrote {new_cfg}{Colors.ENDC}")
+        print(f"{Colors.CYAN}Old file kept as {backup.name}; delete it once {CONFIG_NAME} builds correctly.{Colors.ENDC}")
+        print(new_cfg.read_text(encoding="utf-8"), end="")
+        sys.exit(0)
 
     work_dir, file_basenames, config = resolve_target(args.target)
     if not work_dir: print(f"{Colors.FAIL}Invalid target.{Colors.ENDC}"); sys.exit(1)
